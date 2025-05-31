@@ -1,0 +1,7 @@
+[project]
+name = "markov48"
+version = "0.1.0"
+description = "An AI model aiming to solve the game of 2048."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
