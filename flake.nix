@@ -22,8 +22,10 @@
           ];
 
           shellHook = ''
-			uv venv --python ${pkgs.python312}
-			source .venv/bin/activate
+            if [ ! -d .venv ]; then
+              uv venv --python ${pkgs.python312}
+            fi
+            source .venv/bin/activate
 			
             echo "✅ Entered Markov48 devShell on ${system}"
             echo "   • Python interpreter = ${pkgs.python312}"

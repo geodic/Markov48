@@ -33,45 +33,109 @@ from datetime import datetime
 class DQN(keras.Model):
     def __init__(self, num_actions):
         super().__init__()
-        # Neural network layers with increased width for enhanced state space
-        self.input_layer = keras.layers.Input(shape=(40,))
-        self.dense1 = keras.layers.Dense(512, activation='relu')
-        self.dense2 = keras.layers.Dense(256, activation='relu')
-        self.dense3 = keras.layers.Dense(128, activation='relu')
-        self.dense4 = keras.layers.Dense(num_actions)  # Output layer (4 actions: up, down, left, right)
+        
+        # Reshape layer to treat the board as a 2D structure
+        self.reshape = keras.layers.Reshape((4, 4, 1))
+        
+        # Convolutional layers for spatial pattern recognition
+        self.conv1 = keras.layers.Conv2D(64, (2, 2), padding='same',
+                                       kernel_initializer='he_uniform')
+        self.bn1 = keras.layers.BatchNormalization()
+        self.conv2 = keras.layers.Conv2D(128, (2, 2), padding='same',
+                                       kernel_initializer='he_uniform')
+        self.bn2 = keras.layers.BatchNormalization()
+        
+        # Process additional features
+        self.aux_dense = keras.layers.Dense(64, activation='relu',
+                                          kernel_initializer='he_uniform')
+        self.aux_bn = keras.layers.BatchNormalization()
+        
+        # Combine spatial and auxiliary features
+        self.flatten = keras.layers.Flatten()
+        self.combine = keras.layers.Dense(256, activation='relu',
+                                        kernel_initializer='he_uniform')
+        self.bn3 = keras.layers.BatchNormalization()
+        
+        # Policy layers
+        self.dense1 = keras.layers.Dense(128, activation='relu',
+                                       kernel_initializer='he_uniform')
+        self.bn4 = keras.layers.BatchNormalization()
+        self.dropout = keras.layers.Dropout(0.2)
+        self.output_layer = keras.layers.Dense(num_actions,
+                                             kernel_initializer='glorot_uniform')
+        
+        # Value stream for better reward estimation
+        self.value_dense = keras.layers.Dense(64, activation='relu',
+                                            kernel_initializer='he_uniform')
+        self.value_bn = keras.layers.BatchNormalization()
+        self.value = keras.layers.Dense(1, kernel_initializer='glorot_uniform')
+        
+        # Advantage stream for better action selection
+        self.advantage_dense = keras.layers.Dense(64, activation='relu',
+                                                kernel_initializer='he_uniform')
+        self.advantage_bn = keras.layers.BatchNormalization()
+        self.advantage = keras.layers.Dense(num_actions,
+                                          kernel_initializer='glorot_uniform')
     
-    def call(self, x):
-        x = tf.cast(x, tf.float32)  # Convert input to float32
-        x = self.dense1(x)
-        x = self.dense2(x)
-        x = self.dense3(x)
-        x = self.dense4(x)
-        return x
+    def call(self, x, training=False):
+        # Split input into board state and auxiliary features
+        board_values = tf.cast(x[:, :16], tf.float32)  # First 16 values are the board
+        aux_features = tf.cast(x[:, 16:], tf.float32)  # Remaining features are auxiliary
+        
+        # Process board state through conv layers
+        board = self.reshape(board_values)
+        conv = tf.nn.relu(self.bn1(self.conv1(board), training=training))
+        conv = tf.nn.relu(self.bn2(self.conv2(conv), training=training))
+        conv_flat = self.flatten(conv)
+        
+        # Process auxiliary features
+        aux = tf.nn.relu(self.aux_bn(self.aux_dense(aux_features), training=training))
+        
+        # Combine features
+        combined = tf.concat([conv_flat, aux], axis=1)
+        combined = tf.nn.relu(self.bn3(self.combine(combined), training=training))
+        
+        # Value stream
+        value = tf.nn.relu(self.value_bn(self.value_dense(combined), training=training))
+        value = self.value(value)
+        
+        # Advantage stream
+        advantage = tf.nn.relu(self.advantage_bn(self.advantage_dense(combined), training=training))
+        advantage = self.advantage(advantage)
+        
+        # Combine value and advantage (Dueling DQN architecture)
+        q_values = value + (advantage - tf.reduce_mean(advantage, axis=1, keepdims=True))
+        
+        return q_values
 
     def build(self, input_shape):
         super().build(input_shape)  # This is important!
 
 class Agent:
     def __init__(self, load_model=None):
-        self.num_actions = 4  # up, down, left, right
-        self.memory = deque(maxlen=100000)
-        self.gamma = 0.99    # increased discount factor for better long-term planning
-        self.epsilon = 1.0   # exploration rate
-        self.epsilon_min = 0.02  # slightly higher minimum exploration
-        self.epsilon_decay = 0.997  # slower decay for more exploration
-        self.learning_rate = 0.0005  # lower learning rate for stability
+        self.num_actions = 4
+        self.memory = PriorityBuffer(maxlen=100000)  # Use PriorityBuffer instead of deque
+        self.gamma = 0.99
+        self.epsilon = 1.0
+        self.epsilon_min = 0.01  # Lower minimum exploration
+        self.epsilon_decay = 0.9995  # Slower decay
+        self.learning_rate = 0.001  # Start with slightly higher learning rate
+        self.min_learning_rate = 0.0001
+        self.lr_decay = 0.995
         self.model = DQN(self.num_actions)
-        self.target_model = DQN(self.num_actions)  # Target network for stable training
-        self.optimizer = keras.optimizers.Adam(learning_rate=self.learning_rate, clipnorm=1.0)  # Add gradient clipping
+        self.target_model = DQN(self.num_actions)
+        self.optimizer = keras.optimizers.Adam(
+            learning_rate=self.learning_rate,
+            clipnorm=1.0
+        )
         self.update_target_counter = 0
-        self.update_target_every = 5  # Update target network more frequently
-        
-        # Direction mapping
+        self.update_target_every = 10  # Less frequent updates for stability
         self.actions = ['up', 'down', 'left', 'right']
+        self.training_steps = 0
 
         if load_model:
             self.load(load_model)
-            self.epsilon = self.epsilon_min  # Start with minimal exploration if loading model
+            self.epsilon = self.epsilon_min
     
     def get_state(self, board):
         """Convert board state to a feature vector containing:
@@ -123,8 +187,20 @@ class Agent:
         return np.array(features)
     
     def remember(self, state, action, reward, next_state, done):
-        """Store experience in memory"""
-        self.memory.append((state, action, reward, next_state, done))
+        # Calculate TD error for prioritized replay
+        state_tensor = tf.expand_dims(state, 0)
+        next_state_tensor = tf.expand_dims(next_state, 0)
+        
+        current_q = self.model(state_tensor)[0].numpy()
+        next_q = self.target_model(next_state_tensor)[0].numpy()
+        
+        if done:
+            target = reward
+        else:
+            target = reward + self.gamma * np.max(next_q)
+        
+        td_error = abs(target - current_q[action])
+        self.memory.add((state, action, reward, next_state, done), td_error)
     
     def act(self, state, training=True):
         """Choose action using epsilon-greedy policy"""
@@ -137,52 +213,59 @@ class Agent:
         return tf.argmax(action_values[0]).numpy()
     
     def replay(self, batch_size):
-        """Train on a batch of experiences"""
         if len(self.memory) < batch_size:
             return 0
+
+        # Sample from prioritized replay buffer
+        samples, indices, weights = self.memory.sample(batch_size)
+        states = np.array([s[0] for s in samples])
+        actions = np.array([s[1] for s in samples])
+        rewards = np.array([s[2] for s in samples])
+        next_states = np.array([s[3] for s in samples])
+        dones = np.array([s[4] for s in samples])
         
-        minibatch = random.sample(self.memory, batch_size)
-        total_loss = 0
-        
-        states = np.array([x[0] for x in minibatch])
-        next_states = np.array([x[3] for x in minibatch])
-        
-        # Predict Q-values for current and next states using target network
-        current_q_values = self.model(states)
-        next_q_values = self.target_model(next_states)
-        
-        X = []
-        Y = []
-        
-        for i, (state, action, reward, next_state, done) in enumerate(minibatch):
-            if done:
-                target = reward
-            else:
-                next_q = next_q_values[i].numpy()
-                target = reward + self.gamma * np.max(next_q)
-            
-            target_q_values = current_q_values[i].numpy()
-            target_q_values[action] = target
-            
-            X.append(state)
-            Y.append(target_q_values)
-        
-        X = np.array(X)
-        Y = np.array(Y)
-        
-        # Create loss function instance outside the tape for efficiency
-        mse = tf.keras.losses.MeanSquaredError()
+        # Convert weights to tensor
+        weights = tf.convert_to_tensor(weights, dtype=tf.float32)
         
         with tf.GradientTape() as tape:
-            q_values = self.model(X)
-            total_loss = mse(Y, q_values)
+            # Current Q-values
+            current_q = self.model(states, training=True)
+            target_q = current_q.numpy()
+            
+            # Next Q-values from target network
+            next_q = self.target_model(next_states, training=False)
+            max_next_q = tf.reduce_max(next_q, axis=1)
+            
+            # Calculate targets
+            for i in range(batch_size):
+                if dones[i]:
+                    target_q[i][actions[i]] = rewards[i]
+                else:
+                    target_q[i][actions[i]] = rewards[i] + self.gamma * max_next_q[i]
+            
+            # Calculate weighted loss
+            losses = tf.keras.losses.MSE(target_q, current_q)
+            total_loss = tf.reduce_mean(losses * weights)
         
+        # Apply gradients
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
         
+        # Update priorities in memory
+        td_errors = np.abs(target_q - current_q.numpy())
+        self.memory.update_priorities(indices, td_errors[range(batch_size), actions])
+        
+        # Update exploration and learning rates
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-            
+        
+        self.training_steps += 1
+        if self.training_steps % 1000 == 0:  # Decay learning rate periodically
+            current_lr = self.optimizer.learning_rate.numpy()
+            if current_lr > self.min_learning_rate:
+                new_lr = max(current_lr * self.lr_decay, self.min_learning_rate)
+                self.optimizer.learning_rate.assign(new_lr)
+        
         return float(total_loss)
 
     def update_target_model(self):
@@ -197,6 +280,59 @@ class Agent:
         """Load model weights"""
         self.model.load_weights(filepath)
         self.target_model.set_weights(self.model.get_weights())
+
+class PriorityBuffer:
+    def __init__(self, maxlen=100000, alpha=0.6, beta=0.4):
+        self.memory = []
+        self.maxlen = maxlen
+        self.priorities = []
+        self.alpha = alpha  # Priority exponent
+        self.beta = beta    # Importance sampling exponent
+        self.epsilon = 1e-6  # Small constant to prevent zero probabilities
+    
+    def add(self, experience, error=None):
+        if error is None:
+            priority = max(self.priorities) if self.priorities else 1.0
+        else:
+            priority = (abs(error) + self.epsilon) ** self.alpha
+        
+        if len(self.memory) >= self.maxlen:
+            self.memory.pop(0)
+            self.priorities.pop(0)
+        
+        self.memory.append(experience)
+        self.priorities.append(priority)
+    
+    def sample(self, batch_size):
+        if len(self.memory) < batch_size:
+            return [], [], []
+        
+        # Calculate sampling probabilities
+        total = sum(self.priorities)
+        probabilities = [p/total for p in self.priorities]
+        
+        # Sample indices based on priorities
+        indices = np.random.choice(len(self.memory), batch_size, p=probabilities)
+        
+        # Calculate importance sampling weights
+        weights = []
+        max_weight = (min(probabilities) * len(self.memory)) ** (-self.beta)
+        
+        for idx in indices:
+            prob = probabilities[idx]
+            weight = (prob * len(self.memory)) ** (-self.beta)
+            weights.append(weight / max_weight)
+        
+        samples = [self.memory[idx] for idx in indices]
+        return samples, indices, weights
+    
+    def update_priorities(self, indices, errors):
+        for idx, error in zip(indices, errors):
+            if idx < len(self.priorities):
+                self.priorities[idx] = (abs(error) + self.epsilon) ** self.alpha
+
+    def __len__(self):
+        return len(self.memory)
 
 def calculate_reward(old_score, new_score, moved, highest_tile, merged_tiles, old_board, new_board):
     """Calculate reward based on multiple factors including board patterns and strategic positioning"""
@@ -334,48 +470,46 @@ def evaluate_agent(agent, num_games=100):
         'max_tile': np.max(max_tiles)
     }
 
-def train_agent(episodes=1000, batch_size=128, save_dir='models'):
+def train_agent(episodes=1000, batch_size=64, save_dir='models'):  # Reduced batch size for better stability
     """Train the agent and save progress"""
     os.makedirs(save_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Configure training optimizations
+    # Initialize agent
     agent = Agent()
-    agent.optimizer = keras.optimizers.Adam(
-        learning_rate=agent.learning_rate,
-        beta_1=0.9,
-        beta_2=0.999,
-        epsilon=1e-07
-    )
     
+    # Initialize metrics
     scores = []
     losses = []
     avg_scores = []
     best_score = 0
+    no_improvement_count = 0
+    best_avg_score = float('-inf')
+    patience = 50  # Episodes to wait before early stopping
     
+    # Training loop
     for episode in range(episodes):
         game = Board()
         state = agent.get_state(game.get_board())
         done = False
         episode_loss = 0
         moves = 0
+        episode_rewards = []
         
         while not done:
-            # Choose and perform action
             action_idx = agent.act(state)
             action = agent.actions[action_idx]
             
-            # Get reward and next state
             old_score = game.get_score()
             old_board = game.get_board().copy()
             moved = game.move(action)
             new_score = game.get_score()
             new_board = game.get_board()
             
-            # Calculate reward
             highest_tile = np.max(new_board)
             merged_tiles = np.sum(new_board > old_board)
             reward = calculate_reward(old_score, new_score, moved, highest_tile, merged_tiles, old_board, new_board)
+            episode_rewards.append(reward)
             
             next_state = agent.get_state(new_board)
             done = game.is_game_over()
@@ -383,7 +517,8 @@ def train_agent(episodes=1000, batch_size=128, save_dir='models'):
             # Store experience and train
             agent.remember(state, action_idx, reward, next_state, done)
             loss = agent.replay(batch_size)
-            episode_loss += loss
+            if loss > 0:  # Only accumulate non-zero losses
+                episode_loss += loss
             
             state = next_state
             moves += 1
@@ -391,7 +526,7 @@ def train_agent(episodes=1000, batch_size=128, save_dir='models'):
             if moves > 1000:  # Prevent infinite games
                 done = True
         
-        # Update target network periodically
+        # Update target network
         agent.update_target_counter += 1
         if agent.update_target_counter >= agent.update_target_every:
             agent.update_target_model()
@@ -400,31 +535,44 @@ def train_agent(episodes=1000, batch_size=128, save_dir='models'):
         # Record metrics
         score = game.get_score()
         scores.append(score)
-        losses.append(episode_loss / moves if moves > 0 else 0)
+        avg_loss = episode_loss / moves if moves > 0 else 0
+        losses.append(avg_loss)
         
         # Calculate average score
         if len(scores) > 100:
             avg_score = np.mean(scores[-100:])
-            avg_scores.append(avg_score)
+            if avg_score > best_avg_score:
+                best_avg_score = avg_score
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
         else:
             avg_score = np.mean(scores)
-            avg_scores.append(avg_score)
+        avg_scores.append(avg_score)
         
         # Save best model
         if score > best_score:
             best_score = score
             agent.save(f"{save_dir}/best_model_{timestamp}.weights.h5")
         
-        # Print progress
+        # Print detailed progress
         if (episode + 1) % 1 == 0:
-            print(f"Episode: {episode+1}/{episodes}")
-            print(f"Score: {score}, Avg Score: {avg_score:.2f}")
-            print(f"Epsilon: {agent.epsilon:.3f}, Max Tile: {np.max(game.get_board())}")
-            print(f"Avg Loss: {episode_loss/moves if moves > 0 else 0:.4f}")
+            print(f"\nEpisode: {episode+1}/{episodes}")
+            print(f"Score: {score}, Best Score: {best_score}")
+            print(f"Avg Score (100 ep): {avg_score:.2f}, Best Avg Score: {best_avg_score:.2f}")
+            print(f"Epsilon: {agent.epsilon:.3f}, LR: {agent.optimizer.learning_rate.numpy():.6f}")
+            print(f"Max Tile: {highest_tile}, Moves: {moves}")
+            print(f"Avg Loss: {avg_loss:.4f}")
+            print(f"Avg Reward: {np.mean(episode_rewards):.2f}")
             print("-" * 50)
             
             # Plot and save metrics
             plot_metrics(scores, avg_scores, losses, f"{save_dir}/training_progress_{timestamp}.png")
+        
+        # Early stopping check
+        if no_improvement_count >= patience:
+            print(f"\nStopping early - No improvement in average score for {patience} episodes")
+            break
     
     # Final evaluation
     print("\nTraining completed. Running evaluation...")
