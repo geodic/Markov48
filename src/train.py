@@ -55,16 +55,16 @@ class Agent:
     def __init__(self, load_model=None):
         self.num_actions = 4  # up, down, left, right
         self.memory = deque(maxlen=100000)
-        self.gamma = 0.95    # discount factor
+        self.gamma = 0.99    # increased discount factor for better long-term planning
         self.epsilon = 1.0   # exploration rate
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.learning_rate = 0.001
+        self.epsilon_min = 0.02  # slightly higher minimum exploration
+        self.epsilon_decay = 0.997  # slower decay for more exploration
+        self.learning_rate = 0.0005  # lower learning rate for stability
         self.model = DQN(self.num_actions)
         self.target_model = DQN(self.num_actions)  # Target network for stable training
-        self.optimizer = keras.optimizers.Adam(learning_rate=self.learning_rate)
+        self.optimizer = keras.optimizers.Adam(learning_rate=self.learning_rate, clipnorm=1.0)  # Add gradient clipping
         self.update_target_counter = 0
-        self.update_target_every = 10  # Update target network every N episodes
+        self.update_target_every = 5  # Update target network more frequently
         
         # Direction mapping
         self.actions = ['up', 'down', 'left', 'right']
@@ -202,10 +202,10 @@ def calculate_reward(old_score, new_score, moved, highest_tile, merged_tiles, ol
     """Calculate reward based on multiple factors including board patterns and strategic positioning"""
     reward = 0
     
-    # Base reward for score increase (logarithmic scaling to prevent exploitation)
+    # Base reward for score increase (logarithmic scaling with normalized factor)
     score_diff = new_score - old_score
     if score_diff > 0:
-        reward += np.log2(score_diff + 1) * 2
+        reward += np.log2(score_diff + 1) / (np.log2(highest_tile + 1) + 1)  # Normalize by current game progress
     
     # Strategic rewards
     if moved:
@@ -334,14 +334,13 @@ def evaluate_agent(agent, num_games=100):
         'max_tile': np.max(max_tiles)
     }
 
-def train_agent(episodes=1000, batch_size=64, save_dir='models'):
+def train_agent(episodes=1000, batch_size=128, save_dir='models'):
     """Train the agent and save progress"""
     os.makedirs(save_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Configure training optimizations
     agent = Agent()
-    agent.learning_rate = 0.0005  # Slightly lower learning rate for stability
     agent.optimizer = keras.optimizers.Adam(
         learning_rate=agent.learning_rate,
         beta_1=0.9,
