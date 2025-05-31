@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "c2048>=0.1.0",
+    "matplotlib>=3.10.3",
     "numpy>=1.24.0",
     "tensorflow>=2.15.0",
     "tensorflow-cpu>=2.15.0",

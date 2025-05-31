@@ -308,23 +308,18 @@ class PriorityBuffer:
             return [], [], []
         
         # Calculate sampling probabilities
-        total = sum(self.priorities)
-        probabilities = [p/total for p in self.priorities]
+        priorities = np.array(self.priorities)
+        probabilities = priorities / np.sum(priorities)  # Ensure sum to 1
         
         # Sample indices based on priorities
         indices = np.random.choice(len(self.memory), batch_size, p=probabilities)
         
         # Calculate importance sampling weights
-        weights = []
-        max_weight = (min(probabilities) * len(self.memory)) ** (-self.beta)
-        
-        for idx in indices:
-            prob = probabilities[idx]
-            weight = (prob * len(self.memory)) ** (-self.beta)
-            weights.append(weight / max_weight)
+        weights = (probabilities[indices] * len(self.memory)) ** (-self.beta)
+        weights = weights / np.max(weights)  # Normalize weights
         
         samples = [self.memory[idx] for idx in indices]
-        return samples, indices, weights
+        return samples, indices, weights.tolist()
     
     def update_priorities(self, indices, errors):
         for idx, error in zip(indices, errors):
