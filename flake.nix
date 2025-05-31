@@ -17,10 +17,13 @@
           packages = with pkgs; [
             uv
             python312
+            stdenv.cc.cc.lib  # Provides libstdc++
+            python312.pkgs.numpy
           ];
 
           shellHook = ''
 			uv venv --python ${pkgs.python312}
+			source .venv/bin/activate
 			
             echo "✅ Entered Markov48 devShell on ${system}"
             echo "   • Python interpreter = ${pkgs.python312}"

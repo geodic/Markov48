@@ -3,6 +3,21 @@ revision = 2
 requires-python = ">=3.12"
 
 [[package]]
+name = "c2048"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/96/e68619b0cc8824669a3de551754328fe83c744fe637b726841359da3aca9/c2048-0.1.0.tar.gz", hash = "sha256:0a822c129f3ad16543e90a9cacecc8f473f54faab7d0643f39c1fe5e3364100b", size = 8628, upload-time = "2024-09-11T18:07:08.735Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/b1/ffc84e61d0d1bceae1177c92b91e26485a6e906bd7cbb6deacd9b5e57c0a/c2048-0.1.0-cp312-none-win_amd64.whl", hash = "sha256:0e9a98cfdbc53e5073b765739d6e5e8f0aa62fabb2d0ec4c4794ab3166d1670c", size = 162184, upload-time = "2024-09-11T18:07:06.897Z" },
+]
+
+[[package]]
 name = "markov48"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "c2048" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "c2048", specifier = ">=0.1.0" }]
